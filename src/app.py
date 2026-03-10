@@ -71,8 +71,8 @@ DEFAULT_ACTIVITIES = {
     }
 }
 
-DATA_DIR = current_dir / "data"
-DB_PATH = DATA_DIR / "activities.db"
+_default_db_path = current_dir / "data" / "activities.db"
+DB_PATH = Path(os.environ["ACTIVITIES_DB_PATH"]) if "ACTIVITIES_DB_PATH" in os.environ else _default_db_path
 
 
 def get_connection():
@@ -83,7 +83,7 @@ def get_connection():
 
 
 def initialize_database():
-    DATA_DIR.mkdir(exist_ok=True)
+    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
 
     with get_connection() as connection:
         connection.executescript(
