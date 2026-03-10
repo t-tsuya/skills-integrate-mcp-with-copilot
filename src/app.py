@@ -1,18 +1,13 @@
 import os
 import sqlite3
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
-app = FastAPI(title="Mergington High School API",
-              description="API for viewing and signing up for extracurricular activities")
-
-# Mount the static files directory
 current_dir = Path(__file__).parent
-app.mount("/static", StaticFiles(directory=os.path.join(Path(__file__).parent,
-          "static")), name="static")
 
 DEFAULT_ACTIVITIES = {
     "Chess Club": {
@@ -101,6 +96,20 @@ def initialize_database():
                 PRIMARY KEY (activity_name, email),
                 FOREIGN KEY (activity_name) REFERENCES activities(name) ON DELETE CASCADE
             );
+
+            CREATE INDEX IF NOT EXISTS idx_registrations_activity
+            ON activity_registrations(activity_name);
+
+            CREATE TRIGGER IF NOT EXISTS enforce_capacity
+            BEFORE INSERT ON activity_registrations
+            BEGIN
+                SELECT RAISE(ABORT, 'CAPACITY_EXCEEDED: Activity is full')
+                WHERE (
+                    SELECT COUNT(*) FROM activity_registrations WHERE activity_name = NEW.activity_name
+                ) >= (
+                    SELECT max_participants FROM activities WHERE name = NEW.activity_name
+                );
+            END;
             """
         )
 
@@ -183,7 +192,18 @@ def ensure_activity_exists(connection, activity_name: str):
     return activity
 
 
-initialize_database()
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    initialize_database()
+    yield
+
+
+app = FastAPI(title="Mergington High School API",
+              description="API for viewing and signing up for extracurricular activities",
+              lifespan=lifespan)
+
+app.mount("/static", StaticFiles(directory=os.path.join(Path(__file__).parent,
+          "static")), name="static")
 
 
 @app.get("/")
@@ -200,42 +220,23 @@ def get_activities():
 def signup_for_activity(activity_name: str, email: str):
     """Sign up a student for an activity"""
     with get_connection() as connection:
-        activity = ensure_activity_exists(connection, activity_name)
+        ensure_activity_exists(connection, activity_name)
 
-        current_participant_count = connection.execute(
-            """
-            SELECT COUNT(*) AS count
-            FROM activity_registrations
-            WHERE activity_name = ?
-            """,
-            (activity_name,),
-        ).fetchone()["count"]
-
-        if current_participant_count >= activity["max_participants"]:
-            raise HTTPException(status_code=400, detail="Activity is full")
-
-        existing_registration = connection.execute(
-            """
-            SELECT 1
-            FROM activity_registrations
-            WHERE activity_name = ? AND email = ?
-            """,
-            (activity_name, email),
-        ).fetchone()
-
-        if existing_registration:
-            raise HTTPException(
-                status_code=400,
-                detail="Student is already signed up"
+        try:
+            connection.execute(
+                """
+                INSERT INTO activity_registrations (activity_name, email)
+                VALUES (?, ?)
+                """,
+                (activity_name, email),
             )
-
-        connection.execute(
-            """
-            INSERT INTO activity_registrations (activity_name, email)
-            VALUES (?, ?)
-            """,
-            (activity_name, email),
-        )
+        except sqlite3.IntegrityError as e:
+            error_msg = str(e)
+            if "CAPACITY_EXCEEDED" in error_msg:
+                raise HTTPException(status_code=400, detail="Activity is full")
+            if "UNIQUE constraint failed" in error_msg:
+                raise HTTPException(status_code=400, detail="Student is already signed up")
+            raise
 
     return {"message": f"Signed up {email} for {activity_name}"}
 
